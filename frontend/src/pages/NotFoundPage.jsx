@@ -1,5 +1,6 @@
 import React from 'react'
 import { Link } from 'react-router-dom'
+import { ROUTES } from '../app/config/constants'
 
 export default function NotFoundPage() {
   return (
@@ -7,7 +8,7 @@ export default function NotFoundPage() {
       <div className="auth-card auth-card--compact not-found-card">
         <h1 className="not-found-code">404</h1>
         <p className="not-found-copy">Page not found</p>
-        <Link to="/chat" className="auth-link not-found-link">Go back to chat</Link>
+        <Link to={ROUTES.THOUGHTS} className="auth-link not-found-link">Go to thoughts</Link>
       </div>
     </div>
   )

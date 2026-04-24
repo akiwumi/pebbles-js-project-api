@@ -1,11 +1,10 @@
 import axios from 'axios'
-import { API_BASE_URL } from './constants'
+import { API_ROOT } from './constants'
 
 const api = axios.create({
-  baseURL: API_BASE_URL || undefined,
+  baseURL: API_ROOT || undefined,
 })
 
-// Request interceptor: add token if available
 api.interceptors.request.use((config) => {
   const token = localStorage.getItem('token')
   if (token) {
@@ -14,7 +13,6 @@ api.interceptors.request.use((config) => {
   return config
 })
 
-// Response interceptor: handle 401 (token expired/invalid)
 api.interceptors.response.use(
   (res) => res,
   (err) => {

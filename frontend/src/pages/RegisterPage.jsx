@@ -1,8 +1,9 @@
 import React, { useState } from 'react'
-import { useNavigate, Link } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
+import { ROUTES } from '../app/config/constants'
 import { useAuth } from '../app/hooks/useAuth'
 import { useToast } from '../app/hooks/useToast'
-import { Input, Spinner } from '../components/common'
+import { Input, Spinner, Toast } from '../components/common'
 
 export default function RegisterPage() {
   const [name, setName] = useState('')
@@ -11,42 +12,60 @@ export default function RegisterPage() {
   const [confirmPassword, setConfirmPassword] = useState('')
   const [errors, setErrors] = useState({})
   const { register, loading, error: authError } = useAuth()
-  const { show: showToast } = useToast()
+  const { toast, show: showToast } = useToast()
   const navigate = useNavigate()
 
   const validate = () => {
-    const newErrors = {}
-    if (!name) newErrors.name = 'Name is required'
-    if (!email) newErrors.email = 'Email is required'
-    else if (!/\S+@\S+\.\S+/.test(email)) newErrors.email = 'Email is invalid'
-    if (!password) newErrors.password = 'Password is required'
-    else if (password.length < 6) newErrors.password = 'Password must be at least 6 characters'
-    if (password !== confirmPassword) newErrors.confirmPassword = 'Passwords do not match'
-    return newErrors
+    const nextErrors = {}
+
+    if (!name.trim()) {
+      nextErrors.name = 'Name is required.'
+    }
+
+    if (!email) {
+      nextErrors.email = 'Email is required.'
+    } else if (!/\S+@\S+\.\S+/.test(email)) {
+      nextErrors.email = 'Enter a valid email address.'
+    }
+
+    if (!password) {
+      nextErrors.password = 'Password is required.'
+    } else if (password.length < 6) {
+      nextErrors.password = 'Password must be at least 6 characters long.'
+    }
+
+    if (password !== confirmPassword) {
+      nextErrors.confirmPassword = 'Passwords do not match.'
+    }
+
+    return nextErrors
   }
 
-  const handleSubmit = async (e) => {
-    e.preventDefault()
-    const newErrors = validate()
-    if (Object.keys(newErrors).length > 0) {
-      setErrors(newErrors)
+  const handleSubmit = async (event) => {
+    event.preventDefault()
+    const nextErrors = validate()
+
+    if (Object.keys(nextErrors).length > 0) {
+      setErrors(nextErrors)
       return
     }
 
     try {
-      await register(name, email, password)
-      showToast('Registration successful!', 'success')
-      navigate('/chat')
+      await register(name.trim(), email, password)
+      showToast('Registration successful.', 'success')
+      navigate(ROUTES.THOUGHTS)
     } catch (err) {
-      const msg = err?.response?.data?.message || err?.message || authError || 'Registration failed'
-      showToast(msg, 'error')
+      const message = err?.response?.data?.message || err?.message || authError || 'Registration failed.'
+      showToast(message, 'error')
     }
   }
 
   return (
     <div className="auth-page">
       <div className="auth-card">
-        <h1 className="auth-heading">Create Account</h1>
+        <p className="auth-eyebrow">Pebbles</p>
+        <h1 className="auth-heading">Create your account</h1>
+        <p className="auth-copy">Join the feed and start sharing concise thoughts.</p>
 
         {authError && <div className="auth-alert">{authError}</div>}
 
@@ -55,15 +74,21 @@ export default function RegisterPage() {
             label="Name"
             type="text"
             value={name}
-            onChange={(e) => { setName(e.target.value); setErrors({ ...errors, name: '' }) }}
+            onChange={(event) => {
+              setName(event.target.value)
+              setErrors((current) => ({ ...current, name: '' }))
+            }}
             error={errors.name}
-            placeholder="John Doe"
+            placeholder="Alex Rivers"
           />
           <Input
             label="Email"
             type="email"
             value={email}
-            onChange={(e) => { setEmail(e.target.value); setErrors({ ...errors, email: '' }) }}
+            onChange={(event) => {
+              setEmail(event.target.value)
+              setErrors((current) => ({ ...current, email: '' }))
+            }}
             error={errors.email}
             placeholder="you@example.com"
           />
@@ -71,17 +96,23 @@ export default function RegisterPage() {
             label="Password"
             type="password"
             value={password}
-            onChange={(e) => { setPassword(e.target.value); setErrors({ ...errors, password: '' }) }}
+            onChange={(event) => {
+              setPassword(event.target.value)
+              setErrors((current) => ({ ...current, password: '' }))
+            }}
             error={errors.password}
-            placeholder="••••••••"
+            placeholder="At least 6 characters"
           />
           <Input
-            label="Confirm Password"
+            label="Confirm password"
             type="password"
             value={confirmPassword}
-            onChange={(e) => { setConfirmPassword(e.target.value); setErrors({ ...errors, confirmPassword: '' }) }}
+            onChange={(event) => {
+              setConfirmPassword(event.target.value)
+              setErrors((current) => ({ ...current, confirmPassword: '' }))
+            }}
             error={errors.confirmPassword}
-            placeholder="••••••••"
+            placeholder="Repeat your password"
           />
 
           <button type="submit" className="auth-submit" disabled={loading}>
@@ -90,10 +121,11 @@ export default function RegisterPage() {
         </form>
 
         <div className="auth-footer">
-          Already have an account?{' '}
-          <Link to="/login" className="auth-link">Login</Link>
+          Already have an account? <Link to={ROUTES.LOGIN} className="auth-link">Login</Link>
         </div>
       </div>
+
+      {toast && <Toast message={toast.message} type={toast.type} />}
     </div>
   )
 }

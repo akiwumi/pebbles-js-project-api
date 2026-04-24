@@ -1,6 +1,6 @@
 import React from 'react'
-import { useAuth } from '../hooks/useAuth'
 import { Navigate } from 'react-router-dom'
+import { useAuth } from '../hooks/useAuth'
 import { ROUTES } from '../config/constants'
 
 export function ProtectedRoute({ children }) {
@@ -8,8 +8,8 @@ export function ProtectedRoute({ children }) {
 
   if (loading) {
     return (
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: '100vh' }}>
-        <div>Loading...</div>
+      <div className="page-shell page-shell--centered">
+        <div className="panel panel--loading">Loading...</div>
       </div>
     )
   }
@@ -22,11 +22,11 @@ export function PublicOnlyRoute({ children }) {
 
   if (loading) {
     return (
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: '100vh' }}>
-        <div>Loading...</div>
+      <div className="page-shell page-shell--centered">
+        <div className="panel panel--loading">Loading...</div>
       </div>
     )
   }
 
-  return isAuthenticated ? <Navigate to={ROUTES.CHAT} replace /> : children
+  return isAuthenticated ? <Navigate to={ROUTES.THOUGHTS} replace /> : children
 }

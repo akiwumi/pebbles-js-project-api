@@ -1,16 +1,19 @@
 const express = require('express')
 const cors = require('cors')
-const http = require('http')
-const socketIO = require('socket.io')
-const { randomUUID } = require('crypto')
 const mongoose = require('mongoose')
-const listEndpoints = require('express-list-endpoints')
+const bcrypt = require('bcryptjs')
+const jwt = require('jsonwebtoken')
 require('dotenv').config()
 
+const User = require('./models/User')
+const Thought = require('./models/Thought')
+
 const app = express()
-const server = http.createServer(app)
-const defaultAllowedOrigins = ['http://localhost:5173', 'http://localhost:5174', 'http://127.0.0.1:60028', 'http://127.0.0.1:5173']
-const allowMemoryFallback = process.env.NODE_ENV !== 'production' || process.env.ALLOW_MEMORY_FALLBACK === 'true'
+const PORT = process.env.PORT || 3000
+const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret-change-me'
+const allowMemoryFallback = process.env.NODE_ENV !== 'production'
+
+const defaultAllowedOrigins = ['http://localhost:5173', 'http://localhost:4173']
 
 function parseConfiguredOrigins(value) {
   return (value || '')
@@ -22,69 +25,28 @@ function parseConfiguredOrigins(value) {
 
 const allowedOrigins = Array.from(new Set([
   ...defaultAllowedOrigins,
-  ...parseConfiguredOrigins(process.env.CLIENT_URLS),
-  ...parseConfiguredOrigins(process.env.CLIENT_URL),
+  ...parseConfiguredOrigins(process.env.CORS_ORIGIN),
 ]))
 
-function corsOriginValidator(origin, callback) {
-  if (!origin || allowedOrigins.includes(origin)) {
-    callback(null, true)
-    return
-  }
+app.use(cors({
+  origin(origin, callback) {
+    if (!origin || allowedOrigins.includes(origin.replace(/\/+$/, ''))) {
+      callback(null, true)
+      return
+    }
 
-  callback(new Error(`Origin ${origin} not allowed by CORS`))
-}
-
-const io = socketIO(server, {
-  cors: { origin: allowedOrigins, credentials: true }
-})
-
-// Middleware
-app.use(cors({ origin: corsOriginValidator, credentials: true }))
+    callback(new Error(`Origin ${origin} not allowed by CORS`))
+  },
+  credentials: true,
+}))
 app.use(express.json())
 
-// MongoDB Models
-const User = require('./models/User')
-const Chat = require('./models/Chat')
-const Message = require('./models/Message')
+const dbState = { mode: 'memory' }
 
-// Mock data storage (keeping for backward compatibility during transition)
-const testUsers = {
-  'test@example.com': {
-    _id: '507f1f77bcf86cd799439011',
-    name: 'Test User',
-    email: 'test@example.com',
-    password: 'password123',
-    avatar: 'https://i.pravatar.cc/150?img=1',
-  },
-  'alice@example.com': {
-    _id: '507f1f77bcf86cd799439012',
-    name: 'Alice',
-    email: 'alice@example.com',
-    password: 'password123',
-    avatar: 'https://i.pravatar.cc/150?img=10',
-  },
-  'bob@example.com': {
-    _id: '507f1f77bcf86cd799439013',
-    name: 'Bob',
-    email: 'bob@example.com',
-    password: 'password123',
-    avatar: 'https://i.pravatar.cc/150?img=20',
-  },
-}
-
-const dbState = {
-  mode: 'memory',
-}
-
-const inMemoryStore = {
+const memoryStore = {
   users: new Map(),
-  chats: new Map(),
-  messages: new Map(),
+  thoughts: new Map(),
 }
-
-// In-memory storage for tokens (keep for now)
-const tokens = new Map()
 
 function normalizeId(value) {
   if (value === null || value === undefined) {
@@ -94,860 +56,480 @@ function normalizeId(value) {
   return typeof value === 'string' ? value : value.toString()
 }
 
-function normalizeEmail(email) {
-  return email.trim().toLowerCase()
-}
-
-function toPlainUser(user) {
+function sanitizeUser(user) {
   if (!user) {
     return null
   }
 
   const plain = typeof user.toJSON === 'function' ? user.toJSON() : { ...user }
-  plain._id = normalizeId(plain._id)
-  delete plain.password
-  return plain
+
+  return {
+    _id: normalizeId(plain._id),
+    name: plain.name,
+    email: plain.email,
+    createdAt: plain.createdAt,
+    updatedAt: plain.updatedAt,
+  }
 }
 
-function toPlainChat(chat) {
-  if (!chat) {
+function formatThought(thought) {
+  if (!thought) {
     return null
   }
 
-  const plain = typeof chat.toJSON === 'function' ? chat.toJSON() : { ...chat }
-  plain._id = normalizeId(plain._id)
-  plain.members = Array.isArray(plain.members)
-    ? plain.members.map((member) => {
-      if (member && typeof member === 'object' && 'email' in member) {
-        return toPlainUser(member)
-      }
+  const plain = typeof thought.toJSON === 'function' ? thought.toJSON() : { ...thought }
+  const author = plain.author && typeof plain.author === 'object'
+    ? {
+      _id: normalizeId(plain.author._id),
+      name: plain.author.name,
+      email: plain.author.email,
+    }
+    : null
 
-      return normalizeId(member)
-    })
-    : []
-
-  return plain
+  return {
+    _id: normalizeId(plain._id),
+    text: plain.text,
+    author,
+    likes: Number(plain.likes || 0),
+    createdAt: plain.createdAt,
+    updatedAt: plain.updatedAt,
+  }
 }
 
-function toPlainMessage(message) {
-  if (!message) {
+function validateThoughtText(text) {
+  const trimmed = typeof text === 'string' ? text.trim() : ''
+
+  if (!trimmed) {
+    return 'Thoughts cannot be empty.'
+  }
+
+  if (trimmed.length < 3) {
+    return 'Thoughts must be at least 3 characters long.'
+  }
+
+  if (trimmed.length > 140) {
+    return 'Thoughts cannot be longer than 140 characters.'
+  }
+
+  return null
+}
+
+function createToken(user) {
+  return jwt.sign(
+    {
+      sub: normalizeId(user._id),
+      email: user.email,
+      name: user.name,
+    },
+    JWT_SECRET,
+    { expiresIn: '7d' }
+  )
+}
+
+function extractBearerToken(header = '') {
+  if (!header.startsWith('Bearer ')) {
     return null
   }
 
-  const plain = typeof message.toJSON === 'function' ? message.toJSON() : { ...message }
-  const sender = plain.sender && typeof plain.sender === 'object' ? plain.sender._id : plain.sender
-
-  if (!plain.senderName && plain.sender && typeof plain.sender === 'object' && plain.sender.name) {
-    plain.senderName = plain.sender.name
-  }
-
-  plain._id = normalizeId(plain._id)
-  plain.chatId = normalizeId(plain.chatId)
-  plain.sender = normalizeId(sender)
-  return plain
+  return header.slice(7)
 }
 
-function getUserPassword(user) {
-  if (!user) {
-    return null
-  }
+async function authMiddleware(req, res, next) {
+  try {
+    const token = extractBearerToken(req.headers.authorization)
 
-  if (typeof user.get === 'function') {
-    return user.get('password')
-  }
+    if (!token) {
+      return res.status(401).json({ message: 'Authentication required.' })
+    }
 
-  return user.password
+    const payload = jwt.verify(token, JWT_SECRET)
+    const userId = payload.sub
+    let user
+
+    if (dbState.mode === 'mongo') {
+      user = await User.findById(userId)
+    } else {
+      user = memoryStore.users.get(userId) || null
+    }
+
+    if (!user) {
+      return res.status(401).json({ message: 'Authentication required.' })
+    }
+
+    req.user = sanitizeUser(user)
+    next()
+  } catch (error) {
+    return res.status(401).json({ message: 'Invalid or expired token.' })
+  }
 }
 
-function seedInMemoryStore() {
-  if (inMemoryStore.users.size > 0) {
+function seedMemoryStore() {
+  if (memoryStore.users.size > 0) {
     return
   }
 
-  for (const user of Object.values(testUsers)) {
-    inMemoryStore.users.set(user._id, { ...user })
+  const demoUser = {
+    _id: 'demo-user-1',
+    name: 'Pebbles Demo',
+    email: 'demo@example.com',
+    password: bcrypt.hashSync('password123', 10),
+    createdAt: new Date(Date.now() - 86400000),
+    updatedAt: new Date(Date.now() - 86400000),
   }
 
-  const chatId = '607f1f77bcf86cd799439101'
-  const messages = [
+  const secondUser = {
+    _id: 'demo-user-2',
+    name: 'Alex Rivers',
+    email: 'alex@example.com',
+    password: bcrypt.hashSync('password123', 10),
+    createdAt: new Date(Date.now() - 72000000),
+    updatedAt: new Date(Date.now() - 72000000),
+  }
+
+  const thoughts = [
     {
-      _id: '707f1f77bcf86cd799439201',
-      chatId,
-      text: 'Hey! Welcome to the chat app.',
-      sender: '507f1f77bcf86cd799439012',
-      senderName: 'Alice',
-      seen: true,
-      createdAt: new Date(Date.now() - 300000),
-      updatedAt: new Date(Date.now() - 300000),
+      _id: 'thought-1',
+      text: 'Small steps still count when you are building something real.',
+      authorId: secondUser._id,
+      likes: 2,
+      createdAt: new Date(Date.now() - 1800000),
+      updatedAt: new Date(Date.now() - 1800000),
     },
     {
-      _id: '707f1f77bcf86cd799439202',
-      chatId,
-      text: 'Thanks! Excited to test this out',
-      sender: '507f1f77bcf86cd799439011',
-      senderName: 'Test User',
-      seen: true,
-      createdAt: new Date(Date.now() - 240000),
-      updatedAt: new Date(Date.now() - 240000),
-    },
-    {
-      _id: '707f1f77bcf86cd799439203',
-      chatId,
-      text: 'Messages are real-time with Socket.IO.',
-      sender: '507f1f77bcf86cd799439012',
-      senderName: 'Alice',
-      seen: false,
-      createdAt: new Date(Date.now() - 180000),
-      updatedAt: new Date(Date.now() - 180000),
+      _id: 'thought-2',
+      text: 'A clean loading state makes an app feel much more trustworthy.',
+      authorId: demoUser._id,
+      likes: 1,
+      createdAt: new Date(Date.now() - 600000),
+      updatedAt: new Date(Date.now() - 600000),
     },
   ]
 
-  inMemoryStore.chats.set(chatId, {
-    _id: chatId,
-    name: 'Test Chat',
-    members: ['507f1f77bcf86cd799439011', '507f1f77bcf86cd799439012'],
-    lastMessage: messages[messages.length - 1].text,
-    lastMessageAt: messages[messages.length - 1].createdAt,
-    createdAt: new Date(Date.now() - 360000),
-    updatedAt: new Date(Date.now() - 180000),
-  })
-  inMemoryStore.messages.set(chatId, messages)
+  memoryStore.users.set(demoUser._id, demoUser)
+  memoryStore.users.set(secondUser._id, secondUser)
+  thoughts.forEach((thought) => memoryStore.thoughts.set(thought._id, thought))
 }
 
-function getMemoryUserByEmail(email) {
-  const normalizedEmail = normalizeEmail(email)
+async function connectDatabase() {
+  const mongoUri = process.env.MONGO_URI
 
-  return Array.from(inMemoryStore.users.values()).find((user) => user.email === normalizedEmail) || null
-}
-
-function getMemoryUserById(userId) {
-  return inMemoryStore.users.get(normalizeId(userId)) || null
-}
-
-function getMemoryChatById(chatId) {
-  return inMemoryStore.chats.get(normalizeId(chatId)) || null
-}
-
-async function findUserByEmail(email) {
-  if (dbState.mode === 'mongo') {
-    return User.findOne({ email })
-  }
-
-  return getMemoryUserByEmail(email)
-}
-
-async function createUserRecord({ name, email, password }) {
-  if (dbState.mode === 'mongo') {
-    return User.create({ name, email, password })
-  }
-
-  const user = {
-    _id: randomUUID(),
-    name,
-    email,
-    password,
-    avatar: `https://i.pravatar.cc/150?img=${Math.floor(Math.random() * 70)}`,
-    createdAt: new Date(),
-    updatedAt: new Date(),
-  }
-
-  inMemoryStore.users.set(user._id, user)
-  return user
-}
-
-async function getChatsForUser(userId) {
-  if (dbState.mode === 'mongo') {
-    const chats = await Chat.find({ members: userId })
-      .populate('members', 'name email avatar')
-      .sort({ updatedAt: -1 })
-
-    return chats.map(toPlainChat)
-  }
-
-  return Array.from(inMemoryStore.chats.values())
-    .filter((chat) => chat.members.includes(normalizeId(userId)))
-    .sort((left, right) => new Date(right.updatedAt) - new Date(left.updatedAt))
-    .map((chat) => toPlainChat({
-      ...chat,
-      members: chat.members
-        .map((memberId) => getMemoryUserById(memberId))
-        .filter(Boolean),
-    }))
-}
-
-async function findChatBetweenUsers(userId, otherUserId) {
-  if (dbState.mode === 'mongo') {
-    return Chat.findOne({
-      members: { $all: [userId, otherUserId], $size: 2 },
-    })
-  }
-
-  return Array.from(inMemoryStore.chats.values()).find((chat) => {
-    const members = chat.members.map(normalizeId)
-    return members.length === 2 && members.includes(normalizeId(userId)) && members.includes(normalizeId(otherUserId))
-  }) || null
-}
-
-async function findStarterChatPartner(userId) {
-  const preferredEmails = ['alice@example.com', 'test@example.com', 'bob@example.com']
-
-  if (dbState.mode === 'mongo') {
-    for (const email of preferredEmails) {
-      const user = await User.findOne({
-        _id: { $ne: userId },
-        email,
-      })
-
-      if (user) {
-        return user
-      }
+  if (!mongoUri) {
+    if (!allowMemoryFallback) {
+      throw new Error('MONGO_URI is required in production.')
     }
 
-    return User.findOne({ _id: { $ne: userId } }).sort({ createdAt: 1 })
-  }
-
-  const users = Array.from(inMemoryStore.users.values())
-
-  for (const email of preferredEmails) {
-    const user = users.find((candidate) => (
-      candidate.email === email && normalizeId(candidate._id) !== normalizeId(userId)
-    ))
-
-    if (user) {
-      return user
-    }
-  }
-
-  return users.find((candidate) => normalizeId(candidate._id) !== normalizeId(userId)) || null
-}
-
-async function ensureStarterChatForUser(user) {
-  const partner = await findStarterChatPartner(user._id)
-
-  if (!partner) {
-    return []
-  }
-
-  const existingChat = await findChatBetweenUsers(user._id, partner._id)
-  if (existingChat) {
-    return [await hydrateChat(existingChat)]
-  }
-
-  const starterText = `Hey ${user.name || 'there'}! Welcome to the chat app.`
-  const newChat = await createChatRecord({
-    name: partner.name ? `Chat with ${partner.name}` : 'Welcome Chat',
-    members: [user._id, partner._id],
-  })
-
-  await createMessageRecord({
-    chatId: newChat._id,
-    text: starterText,
-    sender: partner._id,
-    senderName: partner.name || 'Alice',
-  })
-  await updateChatLastMessage(newChat._id, starterText)
-
-  return [await hydrateChat(newChat)]
-}
-
-async function createChatRecord({ name, members }) {
-  if (dbState.mode === 'mongo') {
-    return Chat.create({ name, members })
-  }
-
-  const chat = {
-    _id: randomUUID(),
-    name,
-    members: members.map(normalizeId),
-    lastMessage: '',
-    lastMessageAt: new Date(),
-    createdAt: new Date(),
-    updatedAt: new Date(),
-  }
-
-  inMemoryStore.chats.set(chat._id, chat)
-  inMemoryStore.messages.set(chat._id, [])
-  return chat
-}
-
-async function hydrateChat(chatOrId) {
-  if (!chatOrId) {
-    return null
-  }
-
-  if (dbState.mode === 'mongo') {
-    const chatId = chatOrId._id || chatOrId
-    const chat = await Chat.findById(chatId).populate('members', 'name email avatar')
-    return toPlainChat(chat)
-  }
-
-  const chatId = normalizeId(chatOrId._id || chatOrId)
-  const chat = getMemoryChatById(chatId)
-
-  if (!chat) {
-    return null
-  }
-
-  return toPlainChat({
-    ...chat,
-    members: chat.members
-      .map((memberId) => getMemoryUserById(memberId))
-      .filter(Boolean),
-  })
-}
-
-async function getChatForUser(chatId, userId) {
-  if (dbState.mode === 'mongo') {
-    return Chat.findOne({
-      _id: chatId,
-      members: userId,
-    })
-  }
-
-  const chat = getMemoryChatById(chatId)
-  if (!chat || !chat.members.includes(normalizeId(userId))) {
-    return null
-  }
-
-  return chat
-}
-
-async function getMessagesForChat(chatId) {
-  if (dbState.mode === 'mongo') {
-    const messages = await Message.find({ chatId }).sort({ createdAt: 1 })
-    return messages.map(toPlainMessage)
-  }
-
-  return (inMemoryStore.messages.get(normalizeId(chatId)) || [])
-    .slice()
-    .sort((left, right) => new Date(left.createdAt) - new Date(right.createdAt))
-    .map(toPlainMessage)
-}
-
-async function createMessageRecord({ chatId, text, sender, senderName }) {
-  if (dbState.mode === 'mongo') {
-    const message = await Message.create({
-      chatId,
-      text,
-      sender,
-      senderName,
-    })
-
-    return toPlainMessage(message)
-  }
-
-  const message = {
-    _id: randomUUID(),
-    chatId: normalizeId(chatId),
-    text,
-    sender: normalizeId(sender),
-    senderName,
-    seen: false,
-    createdAt: new Date(),
-    updatedAt: new Date(),
-  }
-
-  const messages = inMemoryStore.messages.get(message.chatId) || []
-  messages.push(message)
-  inMemoryStore.messages.set(message.chatId, messages)
-  return toPlainMessage(message)
-}
-
-async function updateChatLastMessage(chatId, text) {
-  if (dbState.mode === 'mongo') {
-    await Chat.findByIdAndUpdate(chatId, {
-      lastMessage: text,
-      lastMessageAt: new Date(),
-    })
+    seedMemoryStore()
     return
   }
 
-  const chat = getMemoryChatById(chatId)
-  if (!chat) {
-    return
-  }
-
-  chat.lastMessage = text
-  chat.lastMessageAt = new Date()
-  chat.updatedAt = new Date()
-}
-
-// Seed database with test data
-async function seedDatabase() {
   try {
-    // Check if test users already exist
-    const existingUsers = await User.find({ email: { $in: Object.keys(testUsers) } })
-    
-    if (existingUsers.length === 0) {
-      // Create test users
-      const users = await User.create(Object.values(testUsers))
-      console.log('✅ Created test users in MongoDB')
-      
-      // Create test chat between first two users
-      const testChat = await Chat.create({
-        name: 'Test Chat',
-        members: [users[0]._id, users[1]._id],
-        lastMessage: 'Hello! This is a test message.',
-      })
-      
-      // Create test messages
-      await Message.create([
-        {
-          chatId: testChat._id,
-          text: 'Hey! Welcome to the chat app 👋',
-          sender: users[1]._id,
-          senderName: users[1].name,
-          seen: true,
-          createdAt: new Date(Date.now() - 300000),
-        },
-        {
-          chatId: testChat._id,
-          text: 'Thanks! Excited to test this out',
-          sender: users[0]._id,
-          senderName: users[0].name,
-          seen: true,
-          createdAt: new Date(Date.now() - 240000),
-        },
-        {
-          chatId: testChat._id,
-          text: 'Messages are real-time with Socket.IO ⚡',
-          sender: users[1]._id,
-          senderName: users[1].name,
-          seen: false,
-          createdAt: new Date(Date.now() - 180000),
-        },
-      ])
-      
-      console.log('✅ Created test chat and messages in MongoDB')
-    }
-  } catch (error) {
-    console.error('❌ Error seeding database:', error)
-  }
-}
-
-// ===== ROUTES =====
-seedInMemoryStore()
-
-mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/mern-chat')
-  .then(() => {
+    await mongoose.connect(mongoUri)
     dbState.mode = 'mongo'
-    console.log('✅ Connected to MongoDB successfully')
-  })
-  .catch((err) => {
-    if (allowMemoryFallback) {
-      dbState.mode = 'memory'
-      console.error('⚠️ MongoDB unavailable, using in-memory fallback:', err.message)
-      return
+    console.log('Connected to MongoDB')
+  } catch (error) {
+    if (!allowMemoryFallback) {
+      throw error
     }
 
-    console.error('❌ MongoDB connection error:', err.message)
-    process.exit(1)
-  })
-
-// Seed database after connection
-mongoose.connection.once('open', () => {
-  dbState.mode = 'mongo'
-  seedDatabase()
-})
-
-mongoose.connection.on('disconnected', () => {
-  if (allowMemoryFallback) {
-    dbState.mode = 'memory'
-    console.warn('⚠️ MongoDB disconnected, using in-memory fallback data')
-    return
+    console.warn('MongoDB unavailable, using in-memory fallback instead.')
+    seedMemoryStore()
   }
+}
 
-  console.error('❌ MongoDB disconnected')
-  process.exit(1)
+app.get('/health', (_req, res) => {
+  res.json({ ok: true, mode: dbState.mode })
 })
 
-app.get('/health', (req, res) => {
-  res.json({
-    status: 'ok',
-    storageMode: dbState.mode,
-    allowedOrigins,
-    timestamp: new Date().toISOString(),
-  })
-})
-
-// Auth Routes
-app.post('/api/auth/register', async (req, res) => {
+app.post('/auth/register', async (req, res) => {
   try {
-    const { name, email, password } = req.body
-    const normalizedEmail = normalizeEmail(email || '')
+    const name = (req.body.name || '').trim()
+    const email = (req.body.email || '').trim().toLowerCase()
+    const password = req.body.password || ''
 
-    if (!email || !password || !name) {
-      return res.status(400).json({ message: 'All fields required' })
+    if (!name || !email || !password) {
+      return res.status(400).json({ message: 'Name, email, and password are required.' })
     }
 
-    // Check if user already exists
-    const existingUser = await findUserByEmail(normalizedEmail)
+    if (password.length < 6) {
+      return res.status(400).json({ message: 'Password must be at least 6 characters long.' })
+    }
+
+    let existingUser
+
+    if (dbState.mode === 'mongo') {
+      existingUser = await User.findOne({ email })
+    } else {
+      existingUser = Array.from(memoryStore.users.values()).find((user) => user.email === email) || null
+    }
+
     if (existingUser) {
-      return res.status(400).json({ message: 'Email already exists' })
+      return res.status(409).json({ message: 'An account with that email already exists.' })
     }
 
-    // Create new user
-    const newUser = await createUserRecord({ name, email: normalizedEmail, password })
-    const token = 'token_' + newUser._id
-    const plainUser = toPlainUser(newUser)
-    tokens.set(token, plainUser)
+    const hashedPassword = await bcrypt.hash(password, 10)
+    let createdUser
 
-    res.json({
-      token,
-      user: plainUser,
+    if (dbState.mode === 'mongo') {
+      createdUser = await User.create({ name, email, password: hashedPassword })
+    } else {
+      createdUser = {
+        _id: `user-${Date.now()}`,
+        name,
+        email,
+        password: hashedPassword,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      }
+      memoryStore.users.set(createdUser._id, createdUser)
+    }
+
+    const user = sanitizeUser(createdUser)
+
+    return res.status(201).json({
+      token: createToken(user),
+      user,
     })
   } catch (error) {
-    console.error('Registration error:', error)
-    res.status(500).json({ message: 'Server error' })
+    return res.status(500).json({ message: 'Unable to register right now.' })
   }
 })
 
-app.post('/api/auth/login', async (req, res) => {
+app.post('/auth/login', async (req, res) => {
   try {
-    const { email, password } = req.body
-    const normalizedEmail = normalizeEmail(email || '')
+    const email = (req.body.email || '').trim().toLowerCase()
+    const password = req.body.password || ''
 
     if (!email || !password) {
-      return res.status(400).json({ message: 'Email and password required' })
+      return res.status(400).json({ message: 'Email and password are required.' })
     }
 
-    // Find user in database or fall back to test users
-    let user = await findUserByEmail(normalizedEmail)
-    if (!user && testUsers[normalizedEmail]) {
-      user = getMemoryUserByEmail(normalizedEmail)
+    let user
+
+    if (dbState.mode === 'mongo') {
+      user = await User.findOne({ email }).select('+password')
+    } else {
+      user = Array.from(memoryStore.users.values()).find((entry) => entry.email === email) || null
     }
-
-    if (!user || getUserPassword(user) !== password) {
-      return res.status(401).json({ message: 'Invalid email or password' })
-    }
-
-    const token = 'token_' + user._id
-    const plainUser = toPlainUser(user)
-    tokens.set(token, plainUser)
-
-    res.json({
-      token,
-      user: plainUser,
-    })
-  } catch (error) {
-    console.error('Login error:', error)
-    res.status(500).json({ message: 'Server error' })
-  }
-})
-
-app.post('/api/auth/logout', (req, res) => {
-  const token = req.headers.authorization?.split(' ')[1]
-  if (token) {
-    tokens.delete(token)
-  }
-
-  res.json({ message: 'Logged out' })
-})
-
-app.get('/api/auth/me', async (req, res) => {
-  try {
-    const token = req.headers.authorization?.split(' ')[1]
-    let user = tokens.get(token)
 
     if (!user) {
-      return res.status(401).json({ message: 'Not authenticated' })
+      return res.status(401).json({ message: 'Invalid email or password.' })
     }
 
-    if (user.email) {
-      if (dbState.mode === 'mongo') {
-        const dbUser = await findUserByEmail(normalizeEmail(user.email))
-        if (dbUser) {
-          user = toPlainUser(dbUser)
-        }
+    const passwordMatches = await bcrypt.compare(password, user.password)
+
+    if (!passwordMatches) {
+      return res.status(401).json({ message: 'Invalid email or password.' })
+    }
+
+    const safeUser = sanitizeUser(user)
+
+    return res.json({
+      token: createToken(safeUser),
+      user: safeUser,
+    })
+  } catch (error) {
+    return res.status(500).json({ message: 'Unable to log in right now.' })
+  }
+})
+
+app.get('/thoughts', async (_req, res) => {
+  try {
+    let thoughts
+
+    if (dbState.mode === 'mongo') {
+      thoughts = await Thought.find()
+        .populate('author', 'name email')
+        .sort({ createdAt: -1 })
+        .limit(50)
+    } else {
+      thoughts = Array.from(memoryStore.thoughts.values())
+        .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
+        .slice(0, 50)
+        .map((thought) => ({
+          ...thought,
+          author: memoryStore.users.get(thought.authorId) || null,
+        }))
+    }
+
+    return res.json({ thoughts: thoughts.map(formatThought) })
+  } catch (error) {
+    return res.status(500).json({ message: 'Unable to load thoughts right now.' })
+  }
+})
+
+app.post('/thoughts', authMiddleware, async (req, res) => {
+  try {
+    const message = validateThoughtText(req.body.text)
+
+    if (message) {
+      return res.status(400).json({ message })
+    }
+
+    const text = req.body.text.trim()
+    let thought
+
+    if (dbState.mode === 'mongo') {
+      thought = await Thought.create({
+        text,
+        author: req.user._id,
+      })
+      thought = await Thought.findById(thought._id).populate('author', 'name email')
+    } else {
+      thought = {
+        _id: `thought-${Date.now()}`,
+        text,
+        authorId: req.user._id,
+        likes: 0,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        author: memoryStore.users.get(req.user._id) || null,
+      }
+      memoryStore.thoughts.set(thought._id, {
+        _id: thought._id,
+        text: thought.text,
+        authorId: req.user._id,
+        likes: 0,
+        createdAt: thought.createdAt,
+        updatedAt: thought.updatedAt,
+      })
+    }
+
+    return res.status(201).json({ thought: formatThought(thought) })
+  } catch (error) {
+    return res.status(500).json({ message: 'Unable to create a thought right now.' })
+  }
+})
+
+app.put('/thoughts/:thoughtId', authMiddleware, async (req, res) => {
+  try {
+    const message = validateThoughtText(req.body.text)
+
+    if (message) {
+      return res.status(400).json({ message })
+    }
+
+    const text = req.body.text.trim()
+    const { thoughtId } = req.params
+    let thought
+
+    if (dbState.mode === 'mongo') {
+      thought = await Thought.findById(thoughtId)
+
+      if (!thought) {
+        return res.status(404).json({ message: 'Thought not found.' })
+      }
+
+      if (normalizeId(thought.author) !== req.user._id) {
+        return res.status(403).json({ message: 'You can only edit your own thoughts.' })
+      }
+
+      thought.text = text
+      await thought.save()
+      thought = await Thought.findById(thoughtId).populate('author', 'name email')
+    } else {
+      const existingThought = memoryStore.thoughts.get(thoughtId)
+
+      if (!existingThought) {
+        return res.status(404).json({ message: 'Thought not found.' })
+      }
+
+      if (existingThought.authorId !== req.user._id) {
+        return res.status(403).json({ message: 'You can only edit your own thoughts.' })
+      }
+
+      existingThought.text = text
+      existingThought.updatedAt = new Date()
+      thought = {
+        ...existingThought,
+        author: memoryStore.users.get(existingThought.authorId) || null,
+      }
+    }
+
+    return res.json({ thought: formatThought(thought) })
+  } catch (error) {
+    return res.status(500).json({ message: 'Unable to update this thought right now.' })
+  }
+})
+
+app.delete('/thoughts/:thoughtId', authMiddleware, async (req, res) => {
+  try {
+    const { thoughtId } = req.params
+
+    if (dbState.mode === 'mongo') {
+      const thought = await Thought.findById(thoughtId)
+
+      if (!thought) {
+        return res.status(404).json({ message: 'Thought not found.' })
+      }
+
+      if (normalizeId(thought.author) !== req.user._id) {
+        return res.status(403).json({ message: 'You can only delete your own thoughts.' })
+      }
+
+      await Thought.findByIdAndDelete(thoughtId)
+    } else {
+      const thought = memoryStore.thoughts.get(thoughtId)
+
+      if (!thought) {
+        return res.status(404).json({ message: 'Thought not found.' })
+      }
+
+      if (thought.authorId !== req.user._id) {
+        return res.status(403).json({ message: 'You can only delete your own thoughts.' })
+      }
+
+      memoryStore.thoughts.delete(thoughtId)
+    }
+
+    return res.status(204).send()
+  } catch (error) {
+    return res.status(500).json({ message: 'Unable to delete this thought right now.' })
+  }
+})
+
+app.post('/thoughts/:thoughtId/like', async (req, res) => {
+  try {
+    const { thoughtId } = req.params
+    let thought
+
+    if (dbState.mode === 'mongo') {
+      thought = await Thought.findByIdAndUpdate(
+        thoughtId,
+        { $inc: { likes: 1 } },
+        { new: true }
+      ).populate('author', 'name email')
+    } else {
+      const existingThought = memoryStore.thoughts.get(thoughtId)
+
+      if (!existingThought) {
+        thought = null
       } else {
-        const memoryUser = getMemoryUserById(user._id)
-        if (memoryUser) {
-          user = toPlainUser(memoryUser)
+        existingThought.likes += 1
+        existingThought.updatedAt = new Date()
+        thought = {
+          ...existingThought,
+          author: memoryStore.users.get(existingThought.authorId) || null,
         }
       }
     }
 
-    res.json({ user })
+    if (!thought) {
+      return res.status(404).json({ message: 'Thought not found.' })
+    }
+
+    return res.json({ thought: formatThought(thought) })
   } catch (error) {
-    console.error('Auth me error:', error)
-    res.status(500).json({ message: 'Server error' })
+    return res.status(500).json({ message: 'Unable to like this thought right now.' })
   }
 })
 
-// Chat Routes
-app.get('/api/chats', async (req, res) => {
-  try {
-    const token = req.headers.authorization?.split(' ')[1]
-    const user = tokens.get(token)
-    
-    if (!user) {
-      return res.status(401).json({ message: 'Not authenticated' })
-    }
-
-    let chats = await getChatsForUser(user._id)
-
-    if (chats.length === 0) {
-      chats = await ensureStarterChatForUser(user)
-    }
-
-    res.json(chats)
-  } catch (error) {
-    console.error('Get chats error:', error)
-    res.status(500).json({ message: 'Server error' })
-  }
-})
-
-app.post('/api/chats', async (req, res) => {
-  try {
-    const { userId } = req.body
-    const token = req.headers.authorization?.split(' ')[1]
-    const user = tokens.get(token)
-    
-    if (!user) {
-      return res.status(401).json({ message: 'Not authenticated' })
-    }
-
-    if (!userId) {
-      return res.status(400).json({ message: 'userId required' })
-    }
-
-    const otherUser = dbState.mode === 'mongo'
-      ? await User.findById(userId)
-      : getMemoryUserById(userId)
-
-    if (!otherUser) {
-      return res.status(404).json({ message: 'User not found' })
-    }
-
-    // Check if chat already exists between these users
-    const existingChat = await findChatBetweenUsers(user._id, userId)
-
-    if (existingChat) {
-      return res.json(await hydrateChat(existingChat))
-    }
-
-    // Create new chat
-    const newChat = await createChatRecord({
-      name: 'New Chat',
-      members: [user._id, userId],
+connectDatabase()
+  .then(() => {
+    app.listen(PORT, () => {
+      console.log(`Server listening on port ${PORT}`)
     })
-
-    res.json(await hydrateChat(newChat))
-  } catch (error) {
-    console.error('Create chat error:', error)
-    res.status(500).json({ message: 'Server error' })
-  }
-})
-
-// Message Routes
-app.get('/api/messages/:chatId', async (req, res) => {
-  try {
-    const { chatId } = req.params
-    const token = req.headers.authorization?.split(' ')[1]
-    const user = tokens.get(token)
-    
-    if (!user) {
-      return res.status(401).json({ message: 'Not authenticated' })
-    }
-
-    // Verify user is a member of this chat
-    const chat = await getChatForUser(chatId, user._id)
-
-    if (!chat) {
-      return res.status(403).json({ message: 'Access denied' })
-    }
-
-    const messages = await getMessagesForChat(chatId)
-
-    res.json(messages)
-  } catch (error) {
-    console.error('Get messages error:', error)
-    res.status(500).json({ message: 'Server error' })
-  }
-})
-
-app.post('/api/messages', async (req, res) => {
-  try {
-    const { chatId, text } = req.body
-    const token = req.headers.authorization?.split(' ')[1]
-    const user = tokens.get(token)
-
-    if (!chatId || !text) {
-      return res.status(400).json({ message: 'chatId and text required' })
-    }
-
-    if (!user) {
-      return res.status(401).json({ message: 'Not authenticated' })
-    }
-
-    // Verify user is a member of this chat
-    const chat = await getChatForUser(chatId, user._id)
-
-    if (!chat) {
-      return res.status(403).json({ message: 'Access denied' })
-    }
-
-    // Create new message
-    const message = await createMessageRecord({
-      chatId,
-      text,
-      sender: user._id,
-      senderName: user.name,
-    })
-
-    // Update chat's last message
-    await updateChatLastMessage(chatId, text)
-
-    // Emit to all clients in this chat
-    io.to(chatId).emit('message:received', message)
-
-    res.json(message)
-  } catch (error) {
-    console.error('Send message error:', error)
-    res.status(500).json({ message: 'Server error' })
-  }
-})
-
-// API Documentation endpoint
-app.get('/', (req, res) => {
-  const endpoints = listEndpoints(app)
-  const protocol = req.headers['x-forwarded-proto'] || req.protocol
-  const baseUrl = `${protocol}://${req.get('host')}`
-  const documentation = {
-    title: 'MERN Chat API Documentation',
-    version: '1.0.0',
-    description: 'RESTful API for real-time chat application with Socket.IO',
-    storageMode: dbState.mode,
-    baseUrl,
-    endpoints: endpoints.map(endpoint => ({
-      path: endpoint.path,
-      methods: endpoint.methods,
-      description: getEndpointDescription(endpoint.path)
-    })),
-    examples: {
-      auth: {
-        login: {
-          method: 'POST',
-          path: '/api/auth/login',
-          body: { email: 'test@example.com', password: 'password123' },
-          description: 'Authenticate user and receive token'
-        },
-        register: {
-          method: 'POST', 
-          path: '/api/auth/register',
-          body: { name: 'John Doe', email: 'john@example.com', password: 'password123' },
-          description: 'Register new user account'
-        }
-      },
-      chats: {
-        getAll: {
-          method: 'GET',
-          path: '/api/chats',
-          description: 'Get all chats for authenticated user'
-        },
-        create: {
-          method: 'POST',
-          path: '/api/chats',
-          body: { userId: '507f1f77bcf86cd799439012' },
-          description: 'Create new chat with user'
-        }
-      },
-      messages: {
-        getByChat: {
-          method: 'GET',
-          path: '/api/messages/:chatId',
-          description: 'Get all messages for a specific chat'
-        },
-        create: {
-          method: 'POST',
-          path: '/api/messages',
-          body: { chatId: '607f1f77bcf86cd799439101', text: 'Hello!' },
-          description: 'Send new message (emits real-time via Socket.IO)'
-        }
-      }
-    },
-    socketEvents: {
-      'chat:join': 'Join a chat room',
-      'message:send': 'Send a message (real-time)',
-      'message:received': 'Receive a message (real-time)',
-      'user:typing': 'User is typing indicator',
-      'user:stopped-typing': 'User stopped typing indicator'
-    },
-    testCredentials: {
-      users: [
-        { email: 'test@example.com', password: 'password123' },
-        { email: 'alice@example.com', password: 'password123' },
-        { email: 'bob@example.com', password: 'password123' }
-      ]
-    }
-  }
-  res.json(documentation)
-})
-
-// Helper function to provide endpoint descriptions
-function getEndpointDescription(path) {
-  const descriptions = {
-    '/api/auth/register': 'Register a new user account',
-    '/api/auth/login': 'Authenticate user and return JWT token',
-    '/api/auth/logout': 'Logout user (clear session)',
-    '/api/auth/me': 'Get current authenticated user profile',
-    '/api/chats': 'Get all chats for authenticated user (collection)',
-    '/api/chats': 'Create a new chat',
-    '/api/messages/:chatId': 'Get messages for specific chat (single result)',
-    '/api/messages': 'Send a new message (real-time via Socket.IO)'
-  }
-  return descriptions[path] || 'No description available'
-}
-
-// ===== SOCKET.IO =====
-io.on('connection', (socket) => {
-  console.log('✓ User connected:', socket.id)
-
-  socket.on('chat:join', (data) => {
-    socket.join(data.chatId)
-    console.log(`  └─ Joined chat: ${data.chatId}`)
   })
-
-  socket.on('message:send', (data) => {
-    io.to(data.chatId).emit('message:received', data.message)
+  .catch((error) => {
+    console.error('Server failed to start', error)
+    process.exit(1)
   })
-
-  socket.on('user:typing', (data) => {
-    socket.to(data.chatId).emit('user:typing', data)
-  })
-
-  socket.on('user:stopped-typing', (data) => {
-    socket.to(data.chatId).emit('user:stopped-typing', data)
-  })
-
-  socket.on('disconnect', () => {
-    console.log('✗ User disconnected:', socket.id)
-  })
-})
-
-// ===== START SERVER =====
-const PORT = process.env.PORT || 3001
-server.listen(PORT, () => {
-  console.log(`
-╔════════════════════════════════════════╗
-║  MERN Chat Backend — Test Server 🚀   ║
-╠════════════════════════════════════════╣
-║  Server running on port ${PORT}           ║
-║  Allowed origins: ${allowedOrigins.length} configured       ║
-╠════════════════════════════════════════╣
-║  TEST CREDENTIALS:                     ║
-║  ─────────────────────────────────────║
-║  Email:    test@example.com            ║
-║  Password: password123                 ║
-║                                        ║
-║  Also available:                       ║
-║  • alice@example.com / password123     ║
-║  • bob@example.com / password123       ║
-╠════════════════════════════════════════╣
-║  API: http://localhost:${PORT}/api        ║
-║  Socket.IO: ws://localhost:${PORT}        ║
-╚════════════════════════════════════════╝
-`)
-})
-
-module.exports = server

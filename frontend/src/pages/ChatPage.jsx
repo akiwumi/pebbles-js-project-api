@@ -1,375 +1,397 @@
 import React, { useEffect, useRef, useState } from 'react'
+import { Link } from 'react-router-dom'
+import { ROUTES } from '../app/config/constants'
 import { useAuth } from '../app/hooks/useAuth'
 import { useToast } from '../app/hooks/useToast'
-import { useSocket, useSocketEvent } from '../app/hooks/useSocket'
-import { chatService } from '../services/api'
 import { Spinner, Toast } from '../components/common'
+import { thoughtService } from '../services/api'
 
-export default function ChatPage() {
-  const { user, logout } = useAuth()
-  const { socket, isConnected } = useSocket()
+const THOUGHT_LIMIT = 140
+const LIKED_COUNTER_KEY = 'likedThoughtIds'
+
+function validateThought(text) {
+  const trimmed = text.trim()
+
+  if (!trimmed) {
+    return 'Thoughts cannot be empty.'
+  }
+
+  if (trimmed.length < 3) {
+    return 'Thoughts must be at least 3 characters long.'
+  }
+
+  if (trimmed.length > THOUGHT_LIMIT) {
+    return 'Thoughts cannot be longer than 140 characters.'
+  }
+
+  return ''
+}
+
+function formatTimestamp(value) {
+  if (!value) {
+    return ''
+  }
+
+  return new Intl.DateTimeFormat(undefined, {
+    dateStyle: 'medium',
+    timeStyle: 'short',
+  }).format(new Date(value))
+}
+
+export default function ThoughtsPage() {
+  const { user, isAuthenticated, logout } = useAuth()
   const { toast, success, error: showError } = useToast()
-  const [chats, setChats] = useState([])
-  const [activeChatId, setActiveChatId] = useState(null)
-  const [messages, setMessages] = useState([])
-  const [messageText, setMessageText] = useState('')
-  const [loading, setLoading] = useState(true)
-  const [searchQuery, setSearchQuery] = useState('')
-  const [typingUsers, setTypingUsers] = useState({})
-  const [isSidebarOpen, setIsSidebarOpen] = useState(false)
-  const messagesEndRef = useRef(null)
-  const typingTimeoutRef = useRef(null)
-
-  const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }
-
-  useEffect(() => {
-    scrollToBottom()
-  }, [messages])
+  const [thoughts, setThoughts] = useState([])
+  const [draft, setDraft] = useState('')
+  const [editingId, setEditingId] = useState(null)
+  const [editingText, setEditingText] = useState('')
+  const [formError, setFormError] = useState('')
+  const [editError, setEditError] = useState('')
+  const [isFetching, setIsFetching] = useState(true)
+  const [isSubmitting, setIsSubmitting] = useState(false)
+  const [pendingLikeId, setPendingLikeId] = useState(null)
+  const [pendingDeleteId, setPendingDeleteId] = useState(null)
+  const [pendingSaveId, setPendingSaveId] = useState(null)
+  const [likedCount, setLikedCount] = useState(0)
+  const [newThoughtIds, setNewThoughtIds] = useState([])
+  const animationTimeouts = useRef([])
 
   useEffect(() => {
-    return () => {
-      if (typingTimeoutRef.current) {
-        clearTimeout(typingTimeoutRef.current)
-      }
-    }
-  }, [])
-
-  useEffect(() => {
-    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') {
-      return undefined
-    }
-
-    const mediaQuery = window.matchMedia('(min-width: 961px)')
-    const handleChange = (event) => {
-      if (event.matches) {
-        setIsSidebarOpen(false)
-      }
-    }
-
-    if (typeof mediaQuery.addEventListener === 'function') {
-      mediaQuery.addEventListener('change', handleChange)
-      return () => mediaQuery.removeEventListener('change', handleChange)
-    }
-
-    mediaQuery.addListener(handleChange)
-    return () => mediaQuery.removeListener(handleChange)
-  }, [])
-
-  useSocketEvent('message:received', (msg) => {
-    if (msg?.chatId && msg.chatId !== activeChatId) return
-    setMessages((prev) => {
-      if (prev.some((message) => message._id === msg._id)) return prev
-      return [...prev, msg]
-    })
-  })
-
-  useSocketEvent('user:typing', (data) => {
-    if (data.chatId === activeChatId) {
-      setTypingUsers((prev) => ({
-        ...prev,
-        [data.userId]: data.userName || 'User',
-      }))
-
-      setTimeout(() => {
-        setTypingUsers((prev) => {
-          const updated = { ...prev }
-          delete updated[data.userId]
-          return updated
-        })
-      }, 3000)
-    }
-  })
-
-  useSocketEvent('message:seen', (data) => {
-    setMessages((prev) =>
-      prev.map((msg) =>
-        msg._id === data.messageId ? { ...msg, seen: true } : msg
-      )
-    )
-  })
-
-  useEffect(() => {
-    fetchChats()
-  }, [])
-
-  useEffect(() => {
-    if (!activeChatId) {
-      return
-    }
-
-    fetchMessages()
-    socket?.emit('chat:join', { chatId: activeChatId })
-  }, [activeChatId, socket])
-
-  const fetchChats = async () => {
     try {
-      setLoading(true)
-      const data = await chatService.getChats()
-      const nextChats = Array.isArray(data) ? data : data.chats || []
-
-      setChats(nextChats)
-
-      if (!activeChatId && nextChats[0]?._id) {
-        setActiveChatId(nextChats[0]._id)
-      }
-    } catch (err) {
-      showError('Failed to load chats')
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  const fetchMessages = async () => {
-    try {
-      const data = await chatService.getMessages(activeChatId)
-      setMessages(Array.isArray(data) ? data : data.messages || [])
-    } catch (err) {
-      showError('Failed to load messages')
-    }
-  }
-
-  const sendMessage = async () => {
-    const trimmedMessage = messageText.trim()
-
-    if (!trimmedMessage || !activeChatId) return
-
-    setMessageText('')
-
-    try {
-      const sentMsg = await chatService.sendMessage(activeChatId, trimmedMessage)
-      setMessages((prev) => {
-        if (prev.some((message) => message._id === sentMsg._id)) return prev
-        return [...prev, sentMsg]
-      })
-      success('Message sent')
-    } catch (err) {
-      setMessageText(trimmedMessage)
-      showError('Failed to send message')
-    }
-  }
-
-  const handleTyping = () => {
-    if (!activeChatId || !user?._id) {
-      return
-    }
-
-    socket?.emit('user:typing', {
-      chatId: activeChatId,
-      userId: user._id,
-      userName: user.name,
-    })
-
-    if (typingTimeoutRef.current) {
-      clearTimeout(typingTimeoutRef.current)
-    }
-
-    typingTimeoutRef.current = setTimeout(() => {
-      socket?.emit('user:stopped-typing', {
-        chatId: activeChatId,
-        userId: user._id,
-      })
-    }, 1000)
-  }
-
-  const handleLogout = async () => {
-    try {
-      await logout()
-      socket?.disconnect()
-      success('Logged out')
+      const likedIds = JSON.parse(localStorage.getItem(LIKED_COUNTER_KEY) || '[]')
+      setLikedCount(Array.isArray(likedIds) ? likedIds.length : 0)
     } catch {
-      showError('Logout failed')
+      setLikedCount(0)
+    }
+  }, [])
+
+  useEffect(() => {
+    fetchThoughts()
+
+    return () => {
+      animationTimeouts.current.forEach((timeoutId) => clearTimeout(timeoutId))
+    }
+  }, [])
+
+  const fetchThoughts = async () => {
+    try {
+      setIsFetching(true)
+      const data = await thoughtService.getThoughts()
+      setThoughts(Array.isArray(data?.thoughts) ? data.thoughts : [])
+    } catch (err) {
+      showError(err?.response?.data?.message || 'Unable to load thoughts right now.')
+    } finally {
+      setIsFetching(false)
     }
   }
 
-  const handleSelectChat = (chatId) => {
-    setActiveChatId(chatId)
-    setIsSidebarOpen(false)
+  const rememberLikedThought = (thoughtId) => {
+    try {
+      const current = JSON.parse(localStorage.getItem(LIKED_COUNTER_KEY) || '[]')
+      const next = Array.isArray(current) ? current : []
+
+      if (!next.includes(thoughtId)) {
+        const updated = [...next, thoughtId]
+        localStorage.setItem(LIKED_COUNTER_KEY, JSON.stringify(updated))
+        setLikedCount(updated.length)
+      }
+    } catch {
+      // Ignore localStorage parsing issues and keep the UI responsive.
+    }
   }
 
-  const handleComposerKeyDown = (event) => {
-    if (event.key !== 'Enter') {
+  const markThoughtAsNew = (thoughtId) => {
+    setNewThoughtIds((current) => [...current, thoughtId])
+
+    const timeoutId = window.setTimeout(() => {
+      setNewThoughtIds((current) => current.filter((id) => id !== thoughtId))
+    }, 2200)
+
+    animationTimeouts.current.push(timeoutId)
+  }
+
+  const handleSubmit = async (event) => {
+    event.preventDefault()
+    const validationMessage = validateThought(draft)
+
+    if (validationMessage) {
+      setFormError(validationMessage)
       return
     }
 
-    event.preventDefault()
-    sendMessage()
+    try {
+      setIsSubmitting(true)
+      setFormError('')
+      const data = await thoughtService.createThought(draft.trim())
+      const nextThought = data?.thought
+
+      if (nextThought) {
+        setThoughts((current) => [nextThought, ...current])
+        markThoughtAsNew(nextThought._id)
+      }
+
+      setDraft('')
+      success('Thought posted.')
+    } catch (err) {
+      setFormError(err?.response?.data?.message || 'Unable to post your thought right now.')
+    } finally {
+      setIsSubmitting(false)
+    }
   }
 
-  const normalizedQuery = searchQuery.trim().toLowerCase()
-  const filteredChats = chats.filter((chat) => {
-    if (!normalizedQuery) {
-      return true
+  const beginEdit = (thought) => {
+    setEditingId(thought._id)
+    setEditingText(thought.text)
+    setEditError('')
+  }
+
+  const cancelEdit = () => {
+    setEditingId(null)
+    setEditingText('')
+    setEditError('')
+  }
+
+  const handleSaveEdit = async (thoughtId) => {
+    const validationMessage = validateThought(editingText)
+
+    if (validationMessage) {
+      setEditError(validationMessage)
+      return
     }
 
-    return [chat.name, chat.lastMessage]
-      .filter(Boolean)
-      .some((value) => value.toLowerCase().includes(normalizedQuery))
-  })
+    try {
+      setPendingSaveId(thoughtId)
+      const data = await thoughtService.updateThought(thoughtId, editingText.trim())
+      const updatedThought = data?.thought
 
-  const activeChat = chats.find((chat) => chat._id === activeChatId) || null
-  const typingList = Object.values(typingUsers).join(', ')
+      setThoughts((current) =>
+        current.map((thought) => (thought._id === thoughtId ? updatedThought : thought))
+      )
+      cancelEdit()
+      success('Thought updated.')
+    } catch (err) {
+      setEditError(err?.response?.data?.message || 'Unable to save your changes right now.')
+    } finally {
+      setPendingSaveId(null)
+    }
+  }
+
+  const handleDelete = async (thoughtId) => {
+    try {
+      setPendingDeleteId(thoughtId)
+      await thoughtService.deleteThought(thoughtId)
+      setThoughts((current) => current.filter((thought) => thought._id !== thoughtId))
+      success('Thought deleted.')
+    } catch (err) {
+      showError(err?.response?.data?.message || 'Unable to delete this thought right now.')
+    } finally {
+      setPendingDeleteId(null)
+    }
+  }
+
+  const handleLike = async (thoughtId) => {
+    try {
+      setPendingLikeId(thoughtId)
+      const data = await thoughtService.likeThought(thoughtId)
+      const updatedThought = data?.thought
+
+      setThoughts((current) =>
+        current.map((thought) => (thought._id === thoughtId ? updatedThought : thought))
+      )
+      rememberLikedThought(thoughtId)
+    } catch (err) {
+      showError(err?.response?.data?.message || 'Unable to like this thought right now.')
+    } finally {
+      setPendingLikeId(null)
+    }
+  }
+
+  const remainingCharacters = THOUGHT_LIMIT - draft.length
 
   return (
-    <div className="chat-page" data-sidebar-open={isSidebarOpen}>
-      <button
-        type="button"
-        className="chat-sidebar-backdrop"
-        aria-label="Close chats panel"
-        onClick={() => setIsSidebarOpen(false)}
-      />
+    <div className="page-shell">
+      <main className="thoughts-layout">
+        <section className="thoughts-hero panel">
+          <div>
+            <p className="hero-kicker">Pebbles Feed</p>
+            <h1 className="hero-title">Short thoughts, clear ownership, friendly feedback.</h1>
+            <p className="hero-copy">
+              Read the latest posts, like the ones that resonate, and manage your own thoughts when you are signed in.
+            </p>
+          </div>
 
-      <aside id="chat-sidebar" className="chat-sidebar" aria-label="Chat sidebar">
-        <div className="chat-profile">
-          <img
-            src={user?.avatar || 'https://i.pravatar.cc/150?img=12'}
-            alt={user?.name || 'User avatar'}
-            className="chat-avatar"
-          />
-          <div className="chat-profile-meta">
-            <div className="chat-profile-name">{user?.name || 'User'}</div>
-            <div className="chat-profile-status">
-              <span className={`chat-status-dot${isConnected ? ' chat-status-dot--online' : ''}`} />
-              {isConnected ? 'Online' : 'Offline'}
+          <div className="hero-stats">
+            <div className="stat-card">
+              <span className="stat-label">Different thoughts liked</span>
+              <strong className="stat-value">{likedCount}</strong>
+            </div>
+            <div className="stat-card">
+              <span className="stat-label">Signed in as</span>
+              <strong className="stat-value">{user?.name || 'Guest reader'}</strong>
             </div>
           </div>
-          <button type="button" className="chat-logout" onClick={handleLogout}>
-            Logout
-          </button>
-        </div>
+        </section>
 
-        <div className="chat-search-wrap">
-          <label className="chat-search-label" htmlFor="chat-search">
-            Search chats
-          </label>
-          <input
-            id="chat-search"
-            type="text"
-            className="chat-search-input"
-            placeholder="Search chats"
-            value={searchQuery}
-            onChange={(event) => setSearchQuery(event.target.value)}
-          />
-        </div>
-
-        <div className="chat-list-wrap">
-          <div className="chat-list-header">Chats</div>
-
-          {loading ? (
-            <div className="chat-loading">
-              <Spinner />
+        <section className="composer panel">
+          <div className="composer-header">
+            <div>
+              <h2 className="section-title">Share a thought</h2>
+              <p className="section-copy">Keep it concise and within 140 characters.</p>
             </div>
-          ) : filteredChats.length === 0 ? (
-            <div className="chat-list-empty">
-              {normalizedQuery ? 'No chats match your search' : 'No chats yet'}
-            </div>
-          ) : (
-            <div className="chat-list">
-              {filteredChats.map((chat) => (
-                <button
-                  key={chat._id}
-                  type="button"
-                  className={`chat-list-item${activeChatId === chat._id ? ' chat-list-item--active' : ''}`}
-                  onClick={() => handleSelectChat(chat._id)}
-                >
-                  <span className="chat-list-item-name">{chat.name || 'Chat'}</span>
-                  <span className="chat-list-item-preview">
-                    {chat.lastMessage || 'No messages'}
-                  </span>
+
+            {isAuthenticated ? (
+              <button type="button" className="ghost-button" onClick={logout}>
+                Logout
+              </button>
+            ) : (
+              <div className="auth-inline-links">
+                <Link to={ROUTES.LOGIN} className="ghost-button">Login</Link>
+                <Link to={ROUTES.REGISTER} className="primary-link">Register</Link>
+              </div>
+            )}
+          </div>
+
+          {isAuthenticated ? (
+            <form onSubmit={handleSubmit} className="composer-form">
+              <label className="field-label" htmlFor="thought-text">Your thought</label>
+              <textarea
+                id="thought-text"
+                className="composer-textarea"
+                value={draft}
+                onChange={(event) => {
+                  setDraft(event.target.value)
+                  setFormError('')
+                }}
+                placeholder="What is on your mind?"
+                rows={4}
+                disabled={isSubmitting}
+              />
+              <div className="composer-footer">
+                <div>
+                  <div className={`character-counter${remainingCharacters < 0 ? ' character-counter--danger' : ''}`}>
+                    {remainingCharacters} characters remaining
+                  </div>
+                  {formError && <div className="inline-error">{formError}</div>}
+                </div>
+
+                <button type="submit" className="primary-button" disabled={isSubmitting}>
+                  {isSubmitting ? 'Sending...' : 'Post thought'}
                 </button>
-              ))}
+              </div>
+            </form>
+          ) : (
+            <div className="auth-prompt">
+              <p className="auth-prompt-copy">Sign in to create, edit, and delete your own thoughts.</p>
+              <div className="auth-inline-links">
+                <Link to={ROUTES.LOGIN} className="primary-link">Login</Link>
+                <Link to={ROUTES.REGISTER} className="ghost-button">Create account</Link>
+              </div>
             </div>
           )}
-        </div>
-      </aside>
+        </section>
 
-      <main className="chat-main">
-        <header className="chat-header">
-          <div className="chat-header-main">
-            <button
-              type="button"
-              className="chat-sidebar-toggle"
-              aria-controls="chat-sidebar"
-              aria-expanded={isSidebarOpen}
-              onClick={() => setIsSidebarOpen((prev) => !prev)}
-            >
-              Chats
-            </button>
-            <div className="chat-header-copy">
-              <h2 className="chat-header-title">{activeChat?.name || 'Messages'}</h2>
-              <p className="chat-header-subtitle">
-                {activeChat?.lastMessage || 'Pick a conversation and start chatting'}
-              </p>
+        <section className="thoughts-feed panel">
+          <div className="feed-header">
+            <div>
+              <h2 className="section-title">Recent thoughts</h2>
+              <p className="section-copy">Anyone can read. Only owners can update or delete.</p>
             </div>
           </div>
-          <div className="chat-connection-pill">
-            <span className={`chat-status-dot${isConnected ? ' chat-status-dot--online' : ''}`} />
-            {isConnected ? 'Connected' : 'Offline'}
-          </div>
-        </header>
 
-        {activeChatId ? (
-          <>
-            <div className="chat-messages">
-              {messages.length === 0 ? (
-                <div className="chat-empty-state">
-                  No messages yet. Start the conversation.
-                </div>
-              ) : (
-                messages.map((msg, index) => {
-                  const isMine = msg.sender === user?._id
+          {isFetching ? (
+            <div className="loading-state">
+              <Spinner />
+              <span>Loading thoughts...</span>
+            </div>
+          ) : thoughts.length === 0 ? (
+            <div className="empty-state">No thoughts yet. Be the first to post one.</div>
+          ) : (
+            <div className="thought-list">
+              {thoughts.map((thought) => {
+                const isOwner = user?._id && thought.author?._id === user._id
+                const isEditing = editingId === thought._id
+                const isNew = newThoughtIds.includes(thought._id)
 
-                  return (
-                    <div
-                      key={msg._id || `${msg.sender}-${index}`}
-                      className={`chat-message-row${isMine ? ' chat-message-row--mine' : ''}`}
-                    >
-                      <div className={`chat-message${isMine ? ' chat-message--mine' : ''}`}>
-                        <div className="chat-message-author">
-                          {msg.senderName || (isMine ? 'You' : 'User')}
-                        </div>
-                        <div className="chat-message-text">{msg.text}</div>
-                        {isMine && (
-                          <div className="chat-message-status">
-                            {msg.seen ? 'Seen' : 'Sent'}
-                          </div>
+                return (
+                  <article
+                    key={thought._id}
+                    className={`thought-card${isNew ? ' thought-card--new' : ''}`}
+                  >
+                    <header className="thought-card-header">
+                      <div>
+                        <h3 className="thought-author">{thought.author?.name || 'Unknown author'}</h3>
+                        <p className="thought-meta">{formatTimestamp(thought.createdAt)}</p>
+                      </div>
+                      <div className="thought-actions">
+                        <button
+                          type="button"
+                          className="like-button"
+                          onClick={() => handleLike(thought._id)}
+                          disabled={pendingLikeId === thought._id}
+                        >
+                          {pendingLikeId === thought._id ? 'Liking...' : `Like ${thought.likes}`}
+                        </button>
+                        {isOwner && !isEditing && (
+                          <>
+                            <button type="button" className="ghost-button" onClick={() => beginEdit(thought)}>
+                              Edit
+                            </button>
+                            <button
+                              type="button"
+                              className="danger-button"
+                              onClick={() => handleDelete(thought._id)}
+                              disabled={pendingDeleteId === thought._id}
+                            >
+                              {pendingDeleteId === thought._id ? 'Deleting...' : 'Delete'}
+                            </button>
+                          </>
                         )}
                       </div>
-                    </div>
-                  )
-                })
-              )}
+                    </header>
 
-              {typingList && (
-                <div className="chat-typing-indicator">{typingList} is typing...</div>
-              )}
-
-              <div ref={messagesEndRef} />
+                    {isEditing ? (
+                      <div className="edit-form">
+                        <textarea
+                          className="composer-textarea composer-textarea--compact"
+                          value={editingText}
+                          onChange={(event) => {
+                            setEditingText(event.target.value)
+                            setEditError('')
+                          }}
+                          rows={3}
+                          disabled={pendingSaveId === thought._id}
+                        />
+                        <div className="edit-actions">
+                          <div>
+                            <div className={`character-counter${THOUGHT_LIMIT - editingText.length < 0 ? ' character-counter--danger' : ''}`}>
+                              {THOUGHT_LIMIT - editingText.length} characters remaining
+                            </div>
+                            {editError && <div className="inline-error">{editError}</div>}
+                          </div>
+                          <div className="auth-inline-links">
+                            <button type="button" className="ghost-button" onClick={cancelEdit}>
+                              Cancel
+                            </button>
+                            <button
+                              type="button"
+                              className="primary-button"
+                              onClick={() => handleSaveEdit(thought._id)}
+                              disabled={pendingSaveId === thought._id}
+                            >
+                              {pendingSaveId === thought._id ? 'Saving...' : 'Save'}
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    ) : (
+                      <p className="thought-text">{thought.text}</p>
+                    )}
+                  </article>
+                )
+              })}
             </div>
-
-            <div className="chat-composer">
-              <input
-                type="text"
-                className="chat-composer-input"
-                placeholder="Write your message..."
-                value={messageText}
-                onChange={(event) => {
-                  setMessageText(event.target.value)
-                  handleTyping()
-                }}
-                onKeyDown={handleComposerKeyDown}
-              />
-              <button type="button" className="chat-send" onClick={sendMessage}>
-                Send
-              </button>
-            </div>
-          </>
-        ) : (
-          <div className="chat-empty-panel">
-            Select a chat to start messaging
-          </div>
-        )}
+          )}
+        </section>
       </main>
 
       {toast && <Toast message={toast.message} type={toast.type} />}

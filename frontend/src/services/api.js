@@ -14,41 +14,30 @@ export const authService = {
     if (user) localStorage.setItem('user', JSON.stringify(user))
     return res.data
   },
-
-  logout: async () => {
-    try {
-      await api.post(API_ENDPOINTS.AUTH_LOGOUT)
-    } finally {
-      localStorage.removeItem('token')
-      localStorage.removeItem('user')
-    }
-  },
-
-  getMe: async () => {
-    const res = await api.get(API_ENDPOINTS.AUTH_ME)
-    if (res.data?.user) localStorage.setItem('user', JSON.stringify(res.data.user))
-    return res.data
-  },
 }
 
-export const chatService = {
-  getChats: async () => {
-    const res = await api.get(API_ENDPOINTS.CHATS)
+export const thoughtService = {
+  getThoughts: async () => {
+    const res = await api.get(API_ENDPOINTS.THOUGHTS)
     return res.data
   },
 
-  createChat: async (userId) => {
-    const res = await api.post(API_ENDPOINTS.CHATS, { userId })
+  createThought: async (text) => {
+    const res = await api.post(API_ENDPOINTS.THOUGHTS, { text })
     return res.data
   },
 
-  getMessages: async (chatId) => {
-    const res = await api.get(`${API_ENDPOINTS.MESSAGES}/${chatId}`)
+  updateThought: async (thoughtId, text) => {
+    const res = await api.put(`${API_ENDPOINTS.THOUGHTS}/${thoughtId}`, { text })
     return res.data
   },
 
-  sendMessage: async (chatId, text) => {
-    const res = await api.post(API_ENDPOINTS.MESSAGES, { chatId, text })
+  deleteThought: async (thoughtId) => {
+    await api.delete(`${API_ENDPOINTS.THOUGHTS}/${thoughtId}`)
+  },
+
+  likeThought: async (thoughtId) => {
+    const res = await api.post(`${API_ENDPOINTS.THOUGHTS}/${thoughtId}/like`)
     return res.data
   },
 }
