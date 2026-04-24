@@ -11,6 +11,7 @@ const Thought = require('./models/Thought')
 const app = express()
 const PORT = process.env.PORT || 3000
 const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret-change-me'
+const THOUGHT_LIMIT = 240
 const allowMemoryFallback = process.env.NODE_ENV !== 'production'
 
 const defaultAllowedOrigins = ['http://localhost:5173', 'http://localhost:4173']
@@ -107,8 +108,8 @@ function validateThoughtText(text) {
     return 'Thoughts must be at least 3 characters long.'
   }
 
-  if (trimmed.length > 140) {
-    return 'Thoughts cannot be longer than 140 characters.'
+  if (trimmed.length > THOUGHT_LIMIT) {
+    return `Thoughts cannot be longer than ${THOUGHT_LIMIT} characters.`
   }
 
   return null

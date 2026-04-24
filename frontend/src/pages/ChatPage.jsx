@@ -6,7 +6,7 @@ import { useToast } from '../app/hooks/useToast'
 import { Spinner, Toast } from '../components/common'
 import { thoughtService } from '../services/api'
 
-const THOUGHT_LIMIT = 140
+const THOUGHT_LIMIT = 240
 const LIKED_COUNTER_KEY = 'likedThoughtIds'
 
 function validateThought(text) {
@@ -21,7 +21,7 @@ function validateThought(text) {
   }
 
   if (trimmed.length > THOUGHT_LIMIT) {
-    return 'Thoughts cannot be longer than 140 characters.'
+    return `Thoughts cannot be longer than ${THOUGHT_LIMIT} characters.`
   }
 
   return ''
@@ -181,9 +181,9 @@ export default function ThoughtsPage() {
       setPendingDeleteId(thoughtId)
       await thoughtService.deleteThought(thoughtId)
       setThoughts((current) => current.filter((thought) => thought._id !== thoughtId))
-      success('Thought deleted.')
+      success('Thought erased.')
     } catch (err) {
-      showError(err?.response?.data?.message || 'Unable to delete this thought right now.')
+      showError(err?.response?.data?.message || 'Unable to erase this thought right now.')
     } finally {
       setPendingDeleteId(null)
     }
@@ -236,7 +236,7 @@ export default function ThoughtsPage() {
           <div className="composer-header">
             <div>
               <h2 className="section-title">Share a thought</h2>
-              <p className="section-copy">Keep it concise and within 140 characters.</p>
+              <p className="section-copy">Keep it concise and within 240 characters.</p>
             </div>
 
             {isAuthenticated ? (
@@ -281,7 +281,7 @@ export default function ThoughtsPage() {
             </form>
           ) : (
             <div className="auth-prompt">
-              <p className="auth-prompt-copy">Sign in to create, edit, and delete your own thoughts.</p>
+              <p className="auth-prompt-copy">Sign in to create, edit, and erase your own thoughts.</p>
               <div className="auth-inline-links">
                 <Link to={ROUTES.LOGIN} className="primary-link">Login</Link>
                 <Link to={ROUTES.REGISTER} className="ghost-button">Create account</Link>
@@ -294,7 +294,7 @@ export default function ThoughtsPage() {
           <div className="feed-header">
             <div>
               <h2 className="section-title">Recent thoughts</h2>
-              <p className="section-copy">Anyone can read. Only owners can update or delete.</p>
+              <p className="section-copy">Anyone can read. Only owners can update or erase.</p>
             </div>
           </div>
 
@@ -342,7 +342,7 @@ export default function ThoughtsPage() {
                               onClick={() => handleDelete(thought._id)}
                               disabled={pendingDeleteId === thought._id}
                             >
-                              {pendingDeleteId === thought._id ? 'Deleting...' : 'Delete'}
+                              {pendingDeleteId === thought._id ? 'Erasing...' : 'Erase'}
                             </button>
                           </>
                         )}

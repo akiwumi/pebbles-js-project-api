@@ -6,7 +6,7 @@ const thoughtSchema = new mongoose.Schema({
     required: true,
     trim: true,
     minlength: 3,
-    maxlength: 140,
+    maxlength: 240,
   },
   author: {
     type: mongoose.Schema.Types.ObjectId,
